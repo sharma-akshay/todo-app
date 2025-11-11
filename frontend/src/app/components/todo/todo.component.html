@@ -1,0 +1,16 @@
+<div class="container">
+  <h2>Todo App</h2>
+
+  <input [(ngModel)]="newTodoText" placeholder="New Todo">
+  <button (click)="addTodo()">Add</button>
+
+  <ul>
+    <li *ngFor="let t of todos">
+      <input type="checkbox" [checked]="t.completed" (change)="toggle(t)">
+      <span [style.text-decoration]="t.completed ? 'line-through' : 'none'">
+        {{t.text}}
+      </span>
+      <button (click)="remove(t.id)">×</button>
+    </li>
+  </ul>
+</div>

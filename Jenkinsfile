@@ -3,6 +3,7 @@ pipeline {
 
     environment {
         GIT_CREDENTIALS = "github-token"
+        PATH = "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/home/ubuntu/.local/bin:/home/ubuntu/.local/share/pipx/venvs/checkov/bin"
     }
 
     stages {

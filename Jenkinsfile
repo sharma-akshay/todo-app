@@ -6,7 +6,7 @@ pipeline {
    stage('Checkout Code') {
     steps {
       git credentialsId: 'github-token',
-        branch: 'main',
+        branch: 'master',
         url: 'https://github.com/sharma-akshay/todo-app.git'
      }
 }

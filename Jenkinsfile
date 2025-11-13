@@ -200,50 +200,50 @@ pipeline {
        POST STEPS - ALWAYS KEEP REPORTS
     -------------------------------------------------------------*/
     post {
-        always {
-            // keep Jenkins archive as before
-            archiveArtifacts artifacts: '*.json, security-summary.md, security-dashboard.html', allowEmptyArchive: true
-            echo "Reports archived successfully."
+    always {
+        archiveArtifacts artifacts: '*.json, security-summary.md, security-dashboard.html', allowEmptyArchive: true
+        echo "Reports archived successfully."
 
-            // Copy reports to a persistent security-reports folder and create index
-            script {
-                def outDir = "${env.SECURITY_REPORTS_DIR}/${env.BUILD_NUMBER}"
-                sh """
-                    set -e
-                    mkdir -p '${outDir}'
-                    # copy any json reports (avoid overwriting unrelated files)
-                    cp -v *.json '${outDir}/' 2>/dev/null || true
+        script {
+            def outDir = "${env.SECURITY_REPORTS_DIR}/${env.BUILD_NUMBER}"
 
-                    # also copy archived artifacts if present (optional)
-                    if [ -d '${env.WORKSPACE}/archive' ]; then
-                      cp -v ${env.WORKSPACE}/archive/*.json '${outDir}/' 2>/dev/null || true
-                    fi
+            sh """
+                set -e
+                mkdir -p '${outDir}'
 
-                    # copy generated summary and dashboard
-                    cp -v security-summary.md security-dashboard.html '${outDir}/' 2>/dev/null || true
+                # copy reports
+                cp -v *.json '${outDir}/' 2>/dev/null || true
+                cp -v security-summary.md '${outDir}/' 2>/dev/null || true
+                cp -v security-dashboard.html '${outDir}/' 2>/dev/null || true
 
-                    # generate a simple index.html with links to the JSON files and dashboard
-                    cd '${outDir}'
-                    echo "<html><head><meta charset=\\"utf-8\\"><title>Security Reports - Build ${env.BUILD_NUMBER}</title></head><body><h2>Security Reports - Build ${env.BUILD_NUMBER}</h2><ul>" > index.html
-                    for f in *.json *.md *.html; do
-                      [ -f \"$f\" ] || continue
-                      echo "<li><a href='\$f'>\$f</a></li>" >> index.html
-                    done
-                    echo "</ul><p>Generated: \$(date -u)</p></body></html>" >> index.html
+                # generate index.html
+                cd '${outDir}'
+                echo "<html><head><meta charset='utf-8'><title>Security Reports - Build ${env.BUILD_NUMBER}</title></head><body><h2>Security Reports - Build ${env.BUILD_NUMBER}</h2><ul>" > index.html
 
-                    # pretty print any json files for human-readability (jq if present)
-                    if command -v jq >/dev/null 2>&1; then
-                      for f in *.json; do
-                        [ -f \"\$f\" ] || continue
-                        echo \"<li><a href='\\\$f'>\\\$f</a></li>\" >> index.html
-                      done
-                    fi
+                for f in *.json; do
+                  [ -f \"\$f\" ] || continue
+                  echo "<li><a href='\$f'>\$f</a></li>" >> index.html
+                done
 
-                    echo "Saved security reports to: ${outDir}"
-                """
-                // echo path for user convenience
-                echo "Security reports copied to: ${env.SECURITY_REPORTS_DIR}/${env.BUILD_NUMBER}"
-            }
+                echo "<li><a href='security-summary.md'>security-summary.md</a></li>" >> index.html
+                echo "<li><a href='security-dashboard.html'>security-dashboard.html</a></li>" >> index.html
+
+                echo "</ul><p>Generated: \$(date -u)</p></body></html>" >> index.html
+
+                # pretty print JSON
+                if command -v jq >/dev/null 2>&1; then
+                  for f in *.json; do
+                    [ -f \"\$f\" ] || continue
+                    jq '.' \"\$f\" > \"\${f}.pretty.json\" || cp \"\$f\" \"\${f}.pretty.json\"
+                  done
+                fi
+
+                echo "Saved security reports to: ${outDir}"
+            """
+
+            echo "Security reports available at: ${env.SECURITY_REPORTS_DIR}/${env.BUILD_NUMBER}"
         }
     }
+}
+
 }

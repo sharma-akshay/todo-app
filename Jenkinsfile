@@ -4,13 +4,13 @@ pipeline {
     environment {
         GIT_CREDENTIALS = "github-token"
         PATH = "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/home/ubuntu/.local/bin:/home/ubuntu/.local/share/pipx/venvs/checkov/bin"
-        SECURITY_REPORTS_ROOT = "/var/lib/jenkins/security-reports"
+        SECURITY_REPORTS_BASE = "/var/lib/jenkins/security-reports"
     }
 
     stages {
 
         /* ------------------------------------------------------------
-           CHECKOUT CODE
+           1. CHECKOUT CODE
         -------------------------------------------------------------*/
         stage('Checkout') {
             steps {
@@ -21,14 +21,15 @@ pipeline {
         }
 
         /* ------------------------------------------------------------
-           DEVSECOPS SCANNERS
+           2. DEVSECOPS SCANNERS
         -------------------------------------------------------------*/
 
         stage('Secret Scan - Gitleaks') {
             steps {
                 sh '''
                     echo "=== Running Gitleaks ==="
-                    gitleaks detect --source . \
+                    gitleaks detect \
+                        --source . \
                         --report-format json \
                         --report-path gitleaks-report.json || true
                 '''
@@ -39,17 +40,22 @@ pipeline {
             steps {
                 sh '''
                     echo "=== Running Semgrep ==="
-                    semgrep scan --config auto --json > semgrep-report.json || true
+                    semgrep scan \
+                        --config auto \
+                        --json > semgrep-report.json || true
                 '''
             }
         }
 
-        stage('Dependency Vulnerability Scan - OSV-Scanner') {
+        stage('Dependency Scan - OSV Scanner') {
             steps {
                 sh '''
                     echo "=== Running OSV Scanner ==="
-                    # fallback-safe OSV command
-                    osv-scanner --json . > osv-report.json 2>/dev/null || true
+                    # Fix: OSV produces invalid output sometimes → wrap safely
+                    osv-scanner --json > osv-raw.txt 2>/dev/null || true
+
+                    # Fix JSON: replace first invalid numeric literal if needed
+                    sed 's/NaN/"NaN"/g' osv-raw.txt > osv-report.json || cp osv-raw.txt osv-report.json
                 '''
             }
         }
@@ -57,25 +63,46 @@ pipeline {
         stage('Generate SBOM - Syft') {
             steps {
                 sh '''
-                    echo "=== Generating SBOM Using Syft ==="
                     syft dir:. -o json > sbom.json || true
                 '''
             }
         }
 
-        stage('Vulnerability Scan from SBOM - Grype') {
+        /* ------------ FRONTEND + BACKEND SCANS ---------------- */
+
+        stage('Backend SBOM + Grype + Trivy') {
             steps {
                 sh '''
-                    echo "=== Running Grype on SBOM ==="
-                    grype sbom:sbom.json -o json > grype-report.json || true
+                    echo "=== Backend: SBOM ==="
+                    syft backend -o json > sbom-backend.json || true
+
+                    echo "=== Backend: Grype ==="
+                    grype dir:backend -o json > grype-backend.json || true
+
+                    echo "=== Backend: Trivy ==="
+                    trivy fs backend --format json --output trivy-backend.json || true
                 '''
             }
         }
 
-        stage('Filesystem Vulnerability Scan - Trivy FS') {
+        stage('Frontend SBOM + Grype + Trivy') {
             steps {
                 sh '''
-                    echo "=== Running Trivy FS Scan ==="
+                    echo "=== Frontend: SBOM ==="
+                    syft frontend -o json > sbom-frontend.json || true
+
+                    echo "=== Frontend: Grype ==="
+                    grype dir:frontend -o json > grype-frontend.json || true
+
+                    echo "=== Frontend: Trivy ==="
+                    trivy fs frontend --format json --output trivy-frontend.json || true
+                '''
+            }
+        }
+
+        stage('Filesystem Scan - Trivy FS') {
+            steps {
+                sh '''
                     trivy fs . --format json --output trivy-fs-report.json || true
                 '''
             }
@@ -84,14 +111,33 @@ pipeline {
         stage('IaC Scan - Checkov') {
             steps {
                 sh '''
-                    echo "=== Running Checkov ==="
                     checkov -d . -o json > checkov-report.json || true
                 '''
             }
         }
 
         /* ------------------------------------------------------------
-           DOCKER BUILD & DEPLOY (FRONTEND + BACKEND)
+           3. SEVERITY GATE  (FAIL PIPELINE ON CRITICAL)
+        -------------------------------------------------------------*/
+        stage('Severity Gate') {
+            steps {
+                script {
+                    def criticals = sh(
+                        script: "jq '.. | objects | select(.Severity?==\"CRITICAL\")' *.json | wc -l",
+                        returnStdout: true
+                    ).trim()
+
+                    echo "Critical vulnerabilities found: ${criticals}"
+
+                    if (criticals.toInteger() > 0) {
+                        error "❌ Critical vulnerabilities detected. Failing the build."
+                    }
+                }
+            }
+        }
+
+        /* ------------------------------------------------------------
+           4. DOCKER BUILD & DEPLOY
         -------------------------------------------------------------*/
 
         stage('Build Docker Images') {
@@ -106,65 +152,49 @@ pipeline {
         stage('Deploy Application') {
             steps {
                 sh '''
-                    echo "=== Deploying Application ==="
-                    docker-compose down || true
+                    docker-compose down
                     docker-compose up -d
                 '''
             }
         }
 
         /* ------------------------------------------------------------
-           GENERATE SECURITY SUMMARY
+           5. GENERATE SECURITY SUMMARY
         -------------------------------------------------------------*/
         stage('Generate Security Summary') {
             steps {
                 sh '''
+                    mkdir -p tools || true
                     echo "=== Generating Security Summary ==="
-                    python3 tools/generate-security-summary.py || true
+                    python3 tools/generate-security-summary.py
                 '''
             }
         }
-    }
+    } // stages end
 
     /* ------------------------------------------------------------
-       POST STEPS - ALWAYS KEEP REPORTS
+       6. POST – ARCHIVE & COPY TO NGINX
     -------------------------------------------------------------*/
     post {
         always {
-
             archiveArtifacts artifacts: '*.json, *.pretty.json, security-summary.md, security-dashboard.html', allowEmptyArchive: true
-            echo "Reports archived successfully."
 
             script {
-                def reportDir = "${SECURITY_REPORTS_ROOT}/${BUILD_NUMBER}"
+                def REPORT_DIR = "${SECURITY_REPORTS_BASE}/${BUILD_NUMBER}"
 
-                sh """
-                    echo "Creating report dir: ${reportDir}"
-                    sudo mkdir -p "${reportDir}"
-                    sudo chmod 777 "${reportDir}"
+                // Ensure Jenkins user can write
+                sh "sudo mkdir -p ${SECURITY_REPORTS_BASE}"
+                sh "sudo chmod -R 777 ${SECURITY_REPORTS_BASE}"
 
-                    # Copy JSON + HTML + MD reports
-                    cp -v *.json "${reportDir}/" 2>/dev/null || true
-                    cp -v *.pretty.json "${reportDir}/" 2>/dev/null || true
-                    cp -v security-summary.md "${reportDir}/" 2>/dev/null || true
-                    cp -v security-dashboard.html "${reportDir}/" 2>/dev/null || true
+                sh '''
+                    set -e
+                    BUILD_DIR="${SECURITY_REPORTS_BASE}/${BUILD_NUMBER}"
+                    sudo mkdir -p "$BUILD_DIR"
+                    sudo cp -v *.json *.pretty.json security-summary.md security-dashboard.html "$BUILD_DIR" 2>/dev/null || true
+                    sudo cp -v index.html "$BUILD_DIR" 2>/dev/null || true
+                '''
 
-                    # Build HTML index
-                    cd "${reportDir}"
-                    echo "<html><head><title>Security Reports - Build ${BUILD_NUMBER}</title></head><body><h2>Security Reports - Build ${BUILD_NUMBER}</h2><ul>" > index.html
-
-                    for file in *; do
-                        if [ -f "\$file" ]; then
-                            echo "<li><a href='\$file'>\$file</a></li>" >> index.html
-                        fi
-                    done
-
-                    echo "</ul><p>Generated: $(date -u)</p></body></html>" >> index.html
-
-                    echo "Saved reports to: ${reportDir}"
-                """
-
-                echo "Security reports available at: ${SECURITY_REPORTS_ROOT}/${BUILD_NUMBER}"
+                echo "Security reports available at: http://http://54.210.178.113/security-reports/${BUILD_NUMBER}/index.html"
             }
         }
     }

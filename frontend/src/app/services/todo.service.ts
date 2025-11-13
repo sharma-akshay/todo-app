@@ -6,7 +6,7 @@ import { Injectable } from '@angular/core';
 })
 export class TodoService {
 
-  private API = 'http://localhost:3000/api/todos';
+  private API = 'http://54.210.178.113/:3000/api/todos';
 
   constructor(private http: HttpClient) {}
 

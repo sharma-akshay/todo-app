@@ -3,21 +3,24 @@ pipeline {
 
   stages {
 
-    stage('Pull Code') {
+    stage('Checkout Code') {
       steps {
-        checkout scm
+        git branch: 'master', url: 'https://github.com/sharma-akshay/todo-app.git'
       }
     }
 
     stage('Build Docker Images') {
       steps {
-        sh 'docker compose -f docker-compose.yml build'
+        sh 'docker-compose build'
       }
     }
 
-    stage('Deploy Application') {
+    stage('Deploy') {
       steps {
-        sh 'docker compose -f docker-compose.yml up -d'
+        sh '''
+          docker-compose down
+          docker-compose up -d
+        '''
       }
     }
   }

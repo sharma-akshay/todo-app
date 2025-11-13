@@ -1,34 +1,14 @@
-version: "3.9"
-
 services:
-  backend:
-    build:
-      context: ./backend
-    container_name: todo-backend
+  frontend:
+    build: ./frontend
+    container_name: todo-frontend
+    ports:
+      - "80:80"
     restart: always
+
+  backend:
+    build: ./backend
+    container_name: todo-backend
     ports:
       - "3000:3000"
-
-  frontend:
-    build:
-      context: ./frontend
-    container_name: todo-frontend
     restart: always
-    ports:
-      - "8081:80"
-
-  jenkins:
-    build:
-      context: ./jenkins
-    container_name: jenkins
-    user: root
-    ports:
-      - "8080:8080"
-      - "50000:50000"
-    volumes:
-      - jenkins_home:/var/jenkins_home
-      - /var/run/docker.sock:/var/run/docker.sock
-    restart: always
-
-volumes:
-  jenkins_home:

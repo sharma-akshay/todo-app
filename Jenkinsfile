@@ -234,8 +234,8 @@ pipeline {
                     # pretty print any json files for human-readability (jq if present)
                     if command -v jq >/dev/null 2>&1; then
                       for f in *.json; do
-                        [ -f \"$f\" ] || continue
-                        jq '.' \"$f\" > \"${f}.pretty.json\" || cp \"$f\" \"${f}.pretty.json\"
+                        [ -f \"\$f\" ] || continue
+                        echo \"<li><a href='\\\$f'>\\\$f</a></li>\" >> index.html
                       done
                     fi
 

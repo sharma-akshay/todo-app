@@ -4,6 +4,8 @@ pipeline {
     environment {
         GIT_CREDENTIALS = "github-token"
         PATH = "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/home/ubuntu/.local/bin:/home/ubuntu/.local/share/pipx/venvs/checkov/bin"
+        // SECURITY_REPORTS_DIR will be resolved on the Jenkins master/agent at runtime
+        SECURITY_REPORTS_DIR = "${env.JENKINS_HOME ?: '/var/lib/jenkins'}/security-reports"
     }
 
     stages {
@@ -50,7 +52,8 @@ pipeline {
             steps {
                 sh '''
                     echo "=== Running OSV Scanner ==="
-                    osv-scanner --all > osv-report.json || true
+                    # If your osv-scanner doesn't like --all, use default invocation:
+                    osv-scanner --all > osv-report.json 2>/dev/null || osv-scanner > osv-report.json 2>/dev/null || true
                 '''
             }
         }
@@ -122,8 +125,46 @@ pipeline {
     -------------------------------------------------------------*/
     post {
         always {
+            // keep Jenkins archive as before
             archiveArtifacts artifacts: '*.json', allowEmptyArchive: true
             echo "Reports archived successfully."
+
+            // Copy reports to a persistent security-reports folder and create index
+            script {
+                def outDir = "${env.SECURITY_REPORTS_DIR}/${env.BUILD_NUMBER}"
+                sh """
+                    set -e
+                    mkdir -p '${outDir}'
+                    # copy any json reports (avoid overwriting unrelated files)
+                    cp -v *.json '${outDir}/' 2>/dev/null || true
+
+                    # also copy archived artifacts if present (optional)
+                    if [ -d '${env.WORKSPACE}/archive' ]; then
+                      cp -v ${env.WORKSPACE}/archive/*.json '${outDir}/' 2>/dev/null || true
+                    fi
+
+                    # generate a simple index.html with links to the JSON files
+                    cd '${outDir}'
+                    echo "<html><head><meta charset=\\"utf-8\\"><title>Security Reports - Build ${env.BUILD_NUMBER}</title></head><body><h2>Security Reports - Build ${env.BUILD_NUMBER}</h2><ul>" > index.html
+                    for f in *.json; do
+                      [ -f \"$f\" ] || continue
+                      echo "<li><a href='\$f'>\$f</a></li>" >> index.html
+                    done
+                    echo "</ul><p>Generated: \$(date -u)</p></body></html>" >> index.html
+
+                    # pretty print any json files for human-readability (jq if present)
+                    if command -v jq >/dev/null 2>&1; then
+                      for f in *.json; do
+                        [ -f \"$f\" ] || continue
+                        jq '.' \"$f\" > \"${f}.pretty.json\" || cp \"$f\" \"${f}.pretty.json\"
+                      done
+                    fi
+
+                    echo "Saved security reports to: ${outDir}"
+                """
+                // echo path for user convenience
+                echo "Security reports copied to: ${env.SECURITY_REPORTS_DIR}/${env.BUILD_NUMBER}"
+            }
         }
     }
 }

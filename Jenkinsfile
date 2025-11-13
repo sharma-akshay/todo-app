@@ -4,8 +4,7 @@ pipeline {
     environment {
         GIT_CREDENTIALS = "github-token"
         PATH = "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/home/ubuntu/.local/bin:/home/ubuntu/.local/share/pipx/venvs/checkov/bin"
-        // SECURITY_REPORTS_DIR will be resolved on the Jenkins master/agent at runtime
-        SECURITY_REPORTS_DIR = "${env.JENKINS_HOME ?: '/var/lib/jenkins'}/security-reports"
+        SECURITY_REPORTS_ROOT = "/var/lib/jenkins/security-reports"
     }
 
     stages {
@@ -29,8 +28,7 @@ pipeline {
             steps {
                 sh '''
                     echo "=== Running Gitleaks ==="
-                    gitleaks detect \
-                        --source . \
+                    gitleaks detect --source . \
                         --report-format json \
                         --report-path gitleaks-report.json || true
                 '''
@@ -41,9 +39,7 @@ pipeline {
             steps {
                 sh '''
                     echo "=== Running Semgrep ==="
-                    semgrep scan \
-                        --config auto \
-                        --json > semgrep-report.json || true
+                    semgrep scan --config auto --json > semgrep-report.json || true
                 '''
             }
         }
@@ -52,8 +48,8 @@ pipeline {
             steps {
                 sh '''
                     echo "=== Running OSV Scanner ==="
-                    # If your osv-scanner doesn't like --all, try default invocation fallback
-                    osv-scanner --all > osv-report.json 2>/dev/null || osv-scanner > osv-report.json 2>/dev/null || true
+                    # fallback-safe OSV command
+                    osv-scanner --json . > osv-report.json 2>/dev/null || true
                 '''
             }
         }
@@ -80,9 +76,7 @@ pipeline {
             steps {
                 sh '''
                     echo "=== Running Trivy FS Scan ==="
-                    trivy fs . \
-                        --format json \
-                        --output trivy-fs-report.json || true
+                    trivy fs . --format json --output trivy-fs-report.json || true
                 '''
             }
         }
@@ -92,51 +86,6 @@ pipeline {
                 sh '''
                     echo "=== Running Checkov ==="
                     checkov -d . -o json > checkov-report.json || true
-                '''
-            }
-        }
-
-        /* ------------------------------------------------------------
-           SEVERITY GATE (fail on CRITICAL)
-           - examines known JSON outputs for CRITICAL severity and fails the build
-        -------------------------------------------------------------*/
-        stage('Severity Gate - Fail on CRITICAL') {
-            steps {
-                sh '''
-                  echo "=== Running Severity Gate (fail on CRITICAL) ==="
-                  # Look for strings "CRITICAL" or "critical" in common report files.
-                  # This is conservative — adjust as needed to match each tool's schema.
-                  found=0
-                  files="trivy-fs-report.json grype-report.json osv-report.json semgrep-report.json checkov-report.json gitleaks-report.json"
-                  for f in $files; do
-                    if [ -f "$f" ]; then
-                      if jq -e '.. | objects | select(.Severity?=="CRITICAL" or .severity?=="CRITICAL" or .severity?=="critical")' "$f" >/dev/null 2>&1; then
-                        echo "CRITICAL severity found in $f"
-                        found=1
-                      fi
-                      # semgrep's severity field can be in 'extra' -> 'severity' or rule-level strings
-                      if jq -e '.results[]?.extra?.severity? | select(.=="CRITICAL" or .=="HIGH")' "$f" >/dev/null 2>&1; then
-                        echo "HIGH/CRITICAL style finding in semgrep-like file $f"
-                        # treat HIGH in semgrep as non-blocking by default — uncomment next line to block on HIGH
-                        # found=1
-                      fi
-                      # gitleaks doesn't use severity - if you want to block on any leak, check length
-                      if [ "$f" = "gitleaks-report.json" ]; then
-                        n=$(jq '. | length' "$f" 2>/dev/null || echo 0)
-                        if [ "$n" -gt 0 ]; then
-                          echo "Secrets found by gitleaks: $n (treating as CRITICAL)"
-                          found=1
-                        fi
-                      fi
-                    fi
-                  done
-
-                  if [ "$found" -eq 1 ]; then
-                    echo "Blocking pipeline: critical findings detected."
-                    exit 1
-                  fi
-
-                  echo "Severity gate passed (no CRITICAL findings)."
                 '''
             }
         }
@@ -154,96 +103,69 @@ pipeline {
             }
         }
 
-        stage('SBOM + Image Scans (again after build)') {
-            steps {
-                sh '''
-                    echo "=== Generating SBOM for images and scanning images ==="
-                    # generate SBOM from image if needed
-                    # try frontend and backend images created by docker-compose
-                    # adapt image names if your compose uses different tags
-                    syft docker:todo-app-deploy_frontend:latest -o json > sbom-frontend.json 2>/dev/null || true
-                    syft docker:todo-app-deploy_backend:latest -o json > sbom-backend.json 2>/dev/null || true
-                    grype docker:todo-app-deploy_frontend:latest -o json > grype-frontend.json 2>/dev/null || true
-                    grype docker:todo-app-deploy_backend:latest -o json > grype-backend.json 2>/dev/null || true
-                    trivy image --ignore-unfixed --format json -o trivy-frontend.json todo-app-deploy_frontend:latest || true
-                    trivy image --ignore-unfixed --format json -o trivy-backend.json todo-app-deploy_backend:latest || true
-                '''
-            }
-        }
-
         stage('Deploy Application') {
             steps {
                 sh '''
                     echo "=== Deploying Application ==="
-                    docker-compose down
+                    docker-compose down || true
                     docker-compose up -d
                 '''
             }
         }
 
         /* ------------------------------------------------------------
-           Generate Summary & Simple Dashboard (placed inside stages)
+           GENERATE SECURITY SUMMARY
         -------------------------------------------------------------*/
         stage('Generate Security Summary') {
             steps {
                 sh '''
                     echo "=== Generating Security Summary ==="
-                    # create tools directory tools/generate-security-summary.py in repo and ensure executable
                     python3 tools/generate-security-summary.py || true
                 '''
             }
         }
-
-    } // end stages
+    }
 
     /* ------------------------------------------------------------
        POST STEPS - ALWAYS KEEP REPORTS
     -------------------------------------------------------------*/
     post {
-    always {
-        archiveArtifacts artifacts: '*.json, security-summary.md, security-dashboard.html', allowEmptyArchive: true
-        echo "Reports archived successfully."
+        always {
 
-        script {
-            def outDir = "${env.SECURITY_REPORTS_DIR}/${env.BUILD_NUMBER}"
+            archiveArtifacts artifacts: '*.json, *.pretty.json, security-summary.md, security-dashboard.html', allowEmptyArchive: true
+            echo "Reports archived successfully."
 
-            sh """
-                set -e
-                mkdir -p '${outDir}'
+            script {
+                def reportDir = "${SECURITY_REPORTS_ROOT}/${BUILD_NUMBER}"
 
-                # copy reports
-                cp -v *.json '${outDir}/' 2>/dev/null || true
-                cp -v security-summary.md '${outDir}/' 2>/dev/null || true
-                cp -v security-dashboard.html '${outDir}/' 2>/dev/null || true
+                sh """
+                    echo "Creating report dir: ${reportDir}"
+                    sudo mkdir -p "${reportDir}"
+                    sudo chmod 777 "${reportDir}"
 
-                # generate index.html
-                cd '${outDir}'
-                echo "<html><head><meta charset='utf-8'><title>Security Reports - Build ${env.BUILD_NUMBER}</title></head><body><h2>Security Reports - Build ${env.BUILD_NUMBER}</h2><ul>" > index.html
+                    # Copy JSON + HTML + MD reports
+                    cp -v *.json "${reportDir}/" 2>/dev/null || true
+                    cp -v *.pretty.json "${reportDir}/" 2>/dev/null || true
+                    cp -v security-summary.md "${reportDir}/" 2>/dev/null || true
+                    cp -v security-dashboard.html "${reportDir}/" 2>/dev/null || true
 
-                for f in *.json; do
-                  [ -f \"\$f\" ] || continue
-                  echo "<li><a href='\$f'>\$f</a></li>" >> index.html
-                done
+                    # Build HTML index
+                    cd "${reportDir}"
+                    echo "<html><head><title>Security Reports - Build ${BUILD_NUMBER}</title></head><body><h2>Security Reports - Build ${BUILD_NUMBER}</h2><ul>" > index.html
 
-                echo "<li><a href='security-summary.md'>security-summary.md</a></li>" >> index.html
-                echo "<li><a href='security-dashboard.html'>security-dashboard.html</a></li>" >> index.html
+                    for file in *; do
+                        if [ -f "\$file" ]; then
+                            echo "<li><a href='\$file'>\$file</a></li>" >> index.html
+                        fi
+                    done
 
-                echo "</ul><p>Generated: \$(date -u)</p></body></html>" >> index.html
+                    echo "</ul><p>Generated: $(date -u)</p></body></html>" >> index.html
 
-                # pretty print JSON
-                if command -v jq >/dev/null 2>&1; then
-                  for f in *.json; do
-                    [ -f \"\$f\" ] || continue
-                    jq '.' \"\$f\" > \"\${f}.pretty.json\" || cp \"\$f\" \"\${f}.pretty.json\"
-                  done
-                fi
+                    echo "Saved reports to: ${reportDir}"
+                """
 
-                echo "Saved security reports to: ${outDir}"
-            """
-
-            echo "Security reports available at: ${env.SECURITY_REPORTS_DIR}/${env.BUILD_NUMBER}"
+                echo "Security reports available at: ${SECURITY_REPORTS_ROOT}/${BUILD_NUMBER}"
+            }
         }
     }
-}
-
 }

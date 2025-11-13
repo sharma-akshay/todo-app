@@ -3,12 +3,13 @@ pipeline {
 
   stages {
 
-    stage('Checkout Code') {
-      steps {
-        git credentialsId: 'github',
-        git branch: 'master', url: 'https://github.com/sharma-akshay/todo-app.git'
-      }
-    }
+   stage('Checkout Code') {
+    steps {
+      git credentialsId: 'github-creds',
+        branch: 'main',
+        url: 'https://github.com/sharma-akshay/todo-app.git'
+     }
+}
 
     stage('Build Docker Images') {
       steps {

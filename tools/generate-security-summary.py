@@ -1,132 +1,149 @@
 #!/usr/bin/env python3
-import json, os, sys
-from datetime import datetime
+"""
+generate-security-summary.py
+Reads standard JSON reports produced by the pipeline and creates:
+ - security-summary.md   (markdown summary)
+ - security-dashboard.html (simple HTML dashboard)
+ - *.pretty.json copies for readability
+"""
 
+import json, os, glob, datetime, html, sys
+
+WORKDIR = os.getcwd()
 REPORT_FILES = {
-    "Gitleaks": "gitleaks-report.json",
-    "Semgrep": "semgrep-report.json",
-    "OSV Scanner": "osv-report.json",
-    "SBOM (Syft)": "sbom.json",
-    "Grype": "grype-report.json",
-    "Trivy FS": "trivy-fs-report.json",
-    "Checkov": "checkov-report.json"
+    "semgrep": "semgrep-report.json",
+    "gitleaks": "gitleaks-report.json",
+    "osv": "osv-report.json",
+    "sbom": "sbom.json",
+    "grype": "grype-report.json",
+    "trivy_fs": "trivy-fs-report.json",
+    "checkov": "checkov-report.json",
+    "grype_frontend": "grype-frontend.json",
+    "grype_backend": "grype-backend.json",
+    "trivy_frontend": "trivy-frontend.json",
+    "trivy_backend": "trivy-backend.json",
+    "sbom_frontend": "sbom-frontend.json",
+    "sbom_backend": "sbom-backend.json"
 }
 
 def load_json(path):
-    if not os.path.exists(path):
-        return None
     try:
-        with open(path, "r", encoding="utf-8") as f:
+        with open(path, 'r', encoding='utf-8') as f:
             return json.load(f)
-    except:
+    except Exception:
         return None
 
-def count_semgrep(findings):
-    if not findings or "results" not in findings:
-        return []
-    data = []
-    for i in findings["results"]:
-        sev = i.get("extra", {}).get("severity", "UNKNOWN")
-        msg = i.get("extra", {}).get("message", "")
-        file = i.get("path", "")
-        data.append((sev, msg, file))
-    return data
+def write_pretty(path):
+    data = load_json(path)
+    if data is None:
+        return
+    out = path + ".pretty.json"
+    try:
+        with open(out, 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+    except Exception:
+        pass
 
-def count_gitleaks(data):
-    leaks = data.get("leaks", []) if data else []
-    return [(l.get("ruleID"), l.get("description")) for l in leaks]
+def count_semgrep(j):
+    if not j: return 0, 0
+    findings = j.get("results", [])
+    total = len(findings)
+    blocking = 0
+    for r in findings:
+        sev = r.get("extra", {}).get("severity", "").upper()
+        if sev in ("HIGH","CRITICAL","ERROR"):
+            blocking += 1
+    return total, blocking
 
-def count_grype(data):
-    vulns = []
-    if not data: 
-        return vulns
-    for match in data.get("matches", []):
-        sev = match["vulnerability"]["severity"]
-        vid = match["vulnerability"]["id"]
-        pkg = match["artifact"]["name"]
-        vulns.append((sev, vid, pkg))
-    return vulns
+def count_gitleaks(j):
+    if not j: return 0
+    return len(j) if isinstance(j, list) else (len(j.keys()) if isinstance(j, dict) else 0)
 
-def count_trivy(data):
-    vulns = []
-    if not data:
-        return vulns
-    for result in data.get("Results", []):
-        for v in result.get("Vulnerabilities", []) or []:
-            vulns.append((v.get("Severity"), v.get("VulnerabilityID"), result.get("Target")))
-    return vulns
-
-def count_osv(data):
-    vulns = []
-    if not data:
-        return vulns
-    for r in data.get("results", []):
-        for p in r.get("packages", []):
-            for v in p.get("vulnerabilities", []):
-                vulns.append((v.get("severity", "UNKNOWN"), v.get("id"), p.get("package", {}).get("name")))
-    return vulns
-
-def count_checkov(data):
-    vulns = []
-    if not data:
-        return vulns
-    for res in data:
-        for f in res.get("failures", []):
-            vulns.append(("HIGH", f.get("check_id"), f.get("file_path")))
-    return vulns
-
-def generate_markdown(summary):
-    md = []
-    md.append(f"# 🔐 Security Scan Summary")
-    md.append(f"Generated on **{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}**\n")
-    md.append("---\n")
-
-    for tool, items in summary.items():
-        md.append(f"## 🛡 {tool}")
-        if not items:
-            md.append("✔ **No issues found.**\n")
-            continue
-
-        table = ["| Severity | ID/Message | File/Package |",
-                 "|---------|------------|--------------|"]
-        for sev, a, b in items:
-            table.append(f"| {sev} | {a} | {b} |")
-        md.extend(table)
-        md.append("\n")
-
-    return "\n".join(md)
+def scan_for_severity(data, field_names=("Severity","severity","level")):
+    # generic walker: returns count of CRITICAL
+    if not data: return 0
+    s = json.dumps(data)
+    return s.lower().count("critical")
 
 def main():
-    summary = {}
+    summary_lines = []
+    html_sections = []
+    now = datetime.datetime.utcnow().isoformat() + "Z"
+    total_critical = 0
 
-    for tool, filename in REPORT_FILES.items():
-        print(f"Processing {filename} ...")
-        data = load_json(filename)
-        if tool == "Semgrep":
-            summary[tool] = count_semgrep(data)
-        elif tool == "Gitleaks":
-            summary[tool] = count_gitleaks(data)
-        elif tool == "Grype":
-            summary[tool] = count_grype(data)
-        elif tool == "Trivy FS":
-            summary[tool] = count_trivy(data)
-        elif tool == "OSV Scanner":
-            summary[tool] = count_osv(data)
-        elif tool == "Checkov":
-            summary[tool] = count_checkov(data)
+    summary_lines.append(f"# Security Summary\n\nGenerated: {now}\n\n")
+
+    for key, fname in REPORT_FILES.items():
+        if not os.path.exists(fname):
+            continue
+        summary_lines.append(f"## {fname}\n")
+        data = load_json(fname)
+        write_pretty(fname)
+        # basic heuristics per tool
+        if key == "semgrep":
+            total, blocking = count_semgrep(data)
+            summary_lines.append(f"- Semgrep findings: {total} (blocking/high: {blocking})\n")
+            total_critical += blocking
+        elif key == "gitleaks":
+            n = count_gitleaks(data)
+            summary_lines.append(f"- Gitleaks findings (secrets): {n}\n")
+            if n > 0:
+                total_critical += n
+        elif key.startswith("grype") or key.startswith("trivy") or key=="grype":
+            c = scan_for_severity(data)
+            summary_lines.append(f"- Vulnerabilities (approximate critical count via text search): {c}\n")
+            total_critical += c
+        elif key == "osv":
+            c = scan_for_severity(data)
+            summary_lines.append(f"- OSV scanner critical-like matches: {c}\n")
+            total_critical += c
+        elif key == "checkov":
+            # checkov JSON usually contains 'results' with 'failed_checks'
+            failed = 0
+            try:
+                results = data.get("results", {})
+                failed = len(results.get("failed_checks", []))
+            except Exception:
+                failed = 0
+            summary_lines.append(f"- Checkov failed checks: {failed}\n")
+            total_critical += failed
         else:
-            summary[tool] = []
+            # generic fallback
+            c = scan_for_severity(data)
+            summary_lines.append(f"- Generic critical-like matches: {c}\n")
+            total_critical += c
 
-    md = generate_markdown(summary)
+        # add link section for HTML to point to pretty JSON
+        pretty = fname + ".pretty.json"
+        if os.path.exists(pretty):
+            link = html.escape(pretty)
+        else:
+            link = html.escape(fname)
+        html_sections.append((fname, link))
 
-    # Save file
-    with open("security-summary.md", "w") as f:
-        f.write(md)
+    summary_lines.append("\n---\n")
+    summary_lines.append(f"**Total approximate critical findings:** {total_critical}\n\n")
 
-    # Print in Jenkins log
-    print("\n===== SECURITY SUMMARY =====\n")
-    print(md)
-    print("\n============================\n")
+    # Write markdown
+    with open("security-summary.md", "w", encoding="utf-8") as f:
+        f.write("\n".join(summary_lines))
+
+    # Write small HTML dashboard
+    with open("security-dashboard.html", "w", encoding="utf-8") as f:
+        f.write("<!doctype html>\n<html>\n<head>\n<meta charset='utf-8'>\n<title>Security Dashboard</title>\n<style>body{font-family:Segoe UI,Arial; margin:20px} h1{color:#333} table{border-collapse:collapse;width:100%} th,td{border:1px solid #ddd;padding:8px} th{background:#f4f4f4}</style>\n</head>\n<body>\n")
+        f.write("<h1>Security Dashboard</h1>\n")
+        f.write(f"<p>Generated: {html.escape(now)}</p>\n")
+        f.write("<h2>Summary</h2>\n")
+        f.write(f"<p>Total approximate CRITICAL findings: <strong>{total_critical}</strong></p>\n")
+        f.write("<h2>Reports</h2>\n")
+        f.write("<table><thead><tr><th>Report file</th><th>Preview</th></tr></thead><tbody>\n")
+        for fname, link in html_sections:
+            f.write(f"<tr><td>{html.escape(fname)}</td><td><a href=\"{html.escape(link)}\">Open</a></td></tr>\n")
+        f.write("</tbody></table>\n")
+        f.write("<p>Notes: this is a lightweight dashboard for quick triage. Use the pretty JSON files (or load into a SARIF viewer) for full details.</p>\n")
+        f.write("</body></html>\n")
+
+    print("Generated security-summary.md and security-dashboard.html (and pretty JSONs where possible).")
 
 if __name__ == "__main__":
     main()

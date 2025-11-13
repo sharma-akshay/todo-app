@@ -121,7 +121,7 @@ pipeline {
     -------------------------------------------------------------*/
     post {
         always {
-            archiveArtifacts artifacts: '*.json', allowEmptyArchive: true
+            archiveArtifacts artifacts: '*.json', fingerprint: true, allowEmptyArchive: true
             echo "Reports archived successfully."
         }
     }

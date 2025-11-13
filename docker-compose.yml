@@ -4,6 +4,8 @@ services:
     container_name: todo-frontend
     ports:
       - "80:80"
+    volumes:
+      - /var/lib/jenkins/security-reports:/var/lib/jenkins/security-reports:ro
     restart: always
 
   backend:

@@ -1,16 +1,34 @@
+version: "3.9"
+
 services:
+  backend:
+    build:
+      context: ./backend
+    container_name: todo-backend
+    restart: always
+    ports:
+      - "3000:3000"
+
   frontend:
-    image: your-angular-image
+    build:
+      context: ./frontend
     container_name: todo-frontend
     restart: always
     ports:
       - "8081:80"
-    volumes:
-      - /var/lib/jenkins/security-reports:/var/lib/jenkins/security-reports:ro
 
-  backend:
-    build: ./backend
-    container_name: todo-backend
+  jenkins:
+    build:
+      context: ./jenkins
+    container_name: jenkins
+    user: root
     ports:
-      - "3000:3000"
+      - "8080:8080"
+      - "50000:50000"
+    volumes:
+      - jenkins_home:/var/jenkins_home
+      - /var/run/docker.sock:/var/run/docker.sock
     restart: always
+
+volumes:
+  jenkins_home:

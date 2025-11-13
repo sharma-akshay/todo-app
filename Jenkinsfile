@@ -119,14 +119,21 @@ pipeline {
             }
         }
     }
-
+    stage('Generate Security Summary') {
+    steps {
+        sh '''
+            echo "=== Generating Security Summary ==="
+            python3 tools/generate-security-summary.py
+        '''
+    }
+}
     /* ------------------------------------------------------------
        POST STEPS - ALWAYS KEEP REPORTS
     -------------------------------------------------------------*/
     post {
         always {
             // keep Jenkins archive as before
-            archiveArtifacts artifacts: '*.json', allowEmptyArchive: true
+            archiveArtifacts artifacts: '*.json, security-summary.md', allowEmptyArchive: true
             echo "Reports archived successfully."
 
             // Copy reports to a persistent security-reports folder and create index

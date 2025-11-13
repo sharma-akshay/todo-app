@@ -1,12 +1,12 @@
 services:
   frontend:
-    build: ./frontend
+    image: your-angular-image
     container_name: todo-frontend
+    restart: always
     ports:
       - "80:80"
     volumes:
       - /var/lib/jenkins/security-reports:/var/lib/jenkins/security-reports:ro
-    restart: always
 
   backend:
     build: ./backend
